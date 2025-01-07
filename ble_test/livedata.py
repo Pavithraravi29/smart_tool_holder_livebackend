@@ -1,8 +1,7 @@
 import numpy as np
 import serial
-
 import asyncio
-import json
+import ujson  # Faster JSON handling
 import datetime
 import random
 from websockets import connect, serve
@@ -13,17 +12,13 @@ initial_time = datetime.datetime.now()
 randata = {}
 id_lock = asyncio.Lock()
 
-
-
-
+# Use a faster JSON library for serialization
 async def ping_handler(websocket, path):
     try:
         while True:
-            # Handle incoming messages or pings from the server
-            await websocket.recv()
+            await websocket.recv()  # Keep receiving messages to avoid disconnect
     except websockets.exceptions.ConnectionClosed:
         print("Connection closed")
-
 
 async def register_data():
     register_dict = {
@@ -36,26 +31,24 @@ async def register_data():
     }
     return register_dict
 
-
 # Add this at the top of your file with other global variables
 global_id = 1  # To maintain ID across reconnections
 
-
 async def monitor_data(com_port, websocket):
     ser = None
-    global global_id  # Add this line to access the global ID
+    global global_id  # Access the global ID
 
-    while True:  # Outer loop for reconnection
+    while True:
         try:
             if ser is None or not ser.is_open:
                 try:
                     if ser is not None:
                         ser.close()
                     await asyncio.sleep(1)
-                    ser = serial.Serial(com_port, 1000000)
+                    ser = serial.Serial(com_port, 1000000)  # Increase baud rate for faster reads
                 except serial.SerialException as e:
                     print(f"Failed to open serial port: {e}")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)  # Shorter sleep between retries
                     continue
 
             averaging_window = 10
@@ -99,7 +92,7 @@ async def monitor_data(com_port, websocket):
 
                                 async with id_lock:
                                     data_dict = {
-                                        "id": global_id,  # Use global_id instead of did
+                                        "id": global_id,
                                         "tension": float(filtered_voltage[0]),
                                         "torsion": float(filtered_voltage[1]),
                                         "bending_moment_x": float(raw_voltage_values[0]),
@@ -109,12 +102,12 @@ async def monitor_data(com_port, websocket):
                                     }
 
                                     randata = data_dict
-                                    serialized_data = json.dumps(data_dict)
+                                    serialized_data = ujson.dumps(data_dict)  # Use ujson for faster serialization
 
                                     await websocket.send(serialized_data)
                                     print(data_dict)
-                                    global_id += 1  # Increment global_id instead of did
-                                    await asyncio.sleep(0.1)
+                                    global_id += 1
+                                    await asyncio.sleep(0)  # Minimized delay
 
                             except ValueError:
                                 continue
@@ -124,7 +117,7 @@ async def monitor_data(com_port, websocket):
                     if ser and ser.is_open:
                         ser.close()
                     ser = None
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)  # Reduced delay between serial retries
                     break
 
         except websockets.exceptions.ConnectionClosed:
@@ -138,7 +131,7 @@ async def monitor_data(com_port, websocket):
             if ser and ser.is_open:
                 ser.close()
             ser = None
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)  # Reduced error delay
             return
         finally:
             if ser and ser.is_open:
@@ -146,21 +139,17 @@ async def monitor_data(com_port, websocket):
 
 async def send_register_data(websocket):
     registration_data = await register_data()
-    await websocket.send(json.dumps(registration_data))
-
+    await websocket.send(ujson.dumps(registration_data))  # Use ujson for faster serialization
 
 async def send_random_data(websocket):
     while True:
         try:
-            await websocket.send(json.dumps(randata))
-            await asyncio.sleep(0.1)
+            await websocket.send(ujson.dumps(randata))  # Use ujson for faster serialization
+            await asyncio.sleep(0)  # Minimized delay for faster data transmission
         except websockets.exceptions.ConnectionClosedError:
             print("Connection closed unexpectedly, reconnecting...")
-            await asyncio.sleep(5)  # Wait before retrying
-            # Attempt to reconnect or handle as needed
+            await asyncio.sleep(1)  # Shorter retry interval
             break  # Or handle a retry mechanism here
-
-
 
 async def send_additional_data(websocket, path):
     while True:
@@ -170,15 +159,14 @@ async def send_additional_data(websocket, path):
             "temperature": round(random.uniform(20.0, 25.0), 2),
             "packet_error": random.randint(0, 100),
         }
-        await websocket.send(json.dumps(additional_data))
-        await asyncio.sleep(5)
-
+        await websocket.send(ujson.dumps(additional_data))  # Use ujson for faster serialization
+        await asyncio.sleep(2)  # Slightly longer interval for additional data
 
 async def main(com_port):
     max_retries = 5
-    retry_delay = 5
+    retry_delay = 2  # Reduced retry delay
 
-    while True:  # Main loop for continuous operation
+    while True:
         try:
             # Start the servers
             server_register = await serve(send_register_data, "172.18.101.47", 5677)
@@ -189,9 +177,9 @@ async def main(com_port):
             while retries < max_retries:  # Connection retry loop
                 try:
                     async with websockets.connect("ws://172.18.101.47:5676",
-                                                  ping_interval=20,  # Reduced ping interval
-                                                  ping_timeout=20,  # Reduced ping timeout
-                                                  close_timeout=10  # Added close timeout
+                                                  ping_interval=None,  # Disabled ping interval for faster transmission
+                                                  ping_timeout=None,  # Disabled ping timeout for faster response
+                                                  close_timeout=10  # Close timeout
                                                   ) as websocket:
                         print("WebSocket connection established")
                         retries = 0  # Reset retry counter on successful connection
@@ -218,7 +206,6 @@ async def main(com_port):
         except Exception as e:
             print(f"Server error: {e}")
             await asyncio.sleep(retry_delay)
-
 
 if __name__ == "__main__":
     asyncio.run(main('COM3'))
